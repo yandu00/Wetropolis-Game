@@ -1,0 +1,335 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import random
+
+# Game parameters
+N_river = 80
+i_moor = N_river // 2
+i_reservoir = 2 * N_river // 3
+i_lake = N_river // 3
+N_moor = 12
+N_reservoir = 6
+N_lake = 6
+N_city = 6
+i_city = 7 * N_river // 8
+h_citywalls = 10
+h_moorweir = 4
+h_reservoirweir = 4
+h_lakeweir = 4
+h_plain = 8
+
+i_leak = i_city - 2
+leak_capacity = 10
+Capacity_plain = 5
+
+delay_time = 1
+y_limit = 30
+
+def roll_dice():
+    return random.randint(1, 16)
+
+def rainfall_location(roll):
+    if 1 <= roll <= 3:
+        return ['reservoir']
+    elif 4 <= roll <= 8:
+        return ['moor', 'lake']
+    elif 9 <= roll <= 15:
+        return ['lake', 'moor', 'reservoir']
+    else:
+        return ['None']
+
+nr1, nr2, nr3, nr4 = 1, 7, 4, 2
+def rainfall_amount(roll):
+    if roll in range(1, 4):
+        return nr1
+    elif roll in range(4, 11):
+        return nr2
+    elif roll in range(11, 16):
+        return nr3
+    else:
+        return nr4
+
+flow_rules = {i: 3 if i<=3 else 5 if i<=6 else 7 for i in range(1,100)}
+wetland_flow_rules = {i: 2 if i<=3 else 4 if i<=6 else 6 for i in range(1,100)}
+
+city_flood_count = 0
+city_flood_history = []
+wetland_status = [False] * N_river
+team_score = 500
+
+def roll_dice_collapse():
+    return random.randint(1, 8)
+
+def check_weir_collapse(weir_height):
+    if weir_height <= 8:
+        return weir_height
+    dice_val = roll_dice_collapse()
+    threshold = weir_height - 8
+    if dice_val <= threshold:
+        print(f"!! Weir collapse from {weir_height} to 4 (roll={dice_val} <= {threshold}).")
+        return 4
+    return weir_height
+
+def spread_overflow(source, threshold, overflow_buffer, col_index, seg_length):
+    level = source[0]
+
+    if level > threshold:
+        total_overflow = int((level - threshold) * seg_length) // 2
+        available_columns = min(3, overflow_buffer.shape[1] - col_index)
+        base, rem = divmod(total_overflow, available_columns)
+        for j in range(available_columns):
+            overflow_buffer[0, col_index + j] += base + (1 if j < rem else 0)
+        source.fill(threshold)
+    return overflow_buffer
+
+def flow_with_leak(river, leak_open, leak_capacity, i_leak):
+    new_river = np.zeros_like(river)
+    total_leaked = 0
+    
+    # Process channel row
+    for i in range(N_river-1, -1, -1):
+        amount = river[0, i]
+        if amount > 0:
+            move = wetland_flow_rules[min(amount,9)] if wetland_status[i] else flow_rules[min(amount,9)]
+            new_pos = min(i + move, N_river-1)
+            if leak_open and i < i_leak <= new_pos and amount > h_citywalls:
+                diverted = min(amount, leak_capacity - total_leaked)
+                total_leaked += diverted
+                new_river[0, new_pos] += amount - diverted
+            else:
+                new_river[0, new_pos] += amount
+                
+    new_river[1, :] = river[1, :]
+    new_river[0, -1] = 0
+    return new_river, total_leaked
+
+def plot_state(river, moor_before, moor_after_rain, moor_after_overflow,
+               reservoir_before, reservoir_after_rain, reservoir_after_overflow,
+               lake_before, lake_after_rain, lake_after_overflow, step, w_moor, w_res, w_lake):
+    plt.clf()
+    
+    # River plot
+    plt.subplot(5, 1, 1)
+    x = np.arange(N_river)
+    plt.bar(x-0.2, river[0], width=0.4, color='blue', label='Channel')
+    plt.bar(x+0.2, river[1], width=0.4, color='green', label='Flood Plain')
+    for i in range(N_river):
+        if river[0, i] > 0:
+            plt.text(i-0.2, river[0, i]+0.1, f"{int(river[0, i])}", ha='center', va='bottom', fontsize=8)
+        if river[1, i] > 0:
+            plt.text(i+0.2, river[1, i]+0.1, f"{int(river[1, i])}", ha='center', va='bottom', fontsize=8)
+    
+    plt.axvline(x=i_moor, color='green', linestyle=':', linewidth=1, label='Moor Outflow')
+    plt.axvline(x=i_moor + 2, color='green', linestyle=':', linewidth=1)
+    plt.axvline(x=i_reservoir, color='brown', linestyle=':', linewidth=1, label='Reservoir Outflow')
+    plt.axvline(x=i_reservoir + 2, color='brown', linestyle=':', linewidth=1)
+    plt.axvline(x=i_lake, color='purple', linestyle=':', linewidth=1, label='Lake Outflow')
+    plt.axvline(x=i_lake + 2, color='purple', linestyle=':', linewidth=1)
+    plt.axvline(x=i_leak, color='pink', linestyle=':', linewidth=1, label = 'Leak Position')
+    
+    plt.axhline(h_citywalls, color='r', linestyle='--', xmin=i_city/N_river, xmax=(i_city+N_city)/N_river)
+    plt.ylim(0, y_limit)
+    plt.title(f"River - Round {step+1}")
+    plt.legend()
+
+    # Moor plot
+    plt.subplot(5, 1, 2)
+    plt.bar(range(N_moor), moor_before, color='green', alpha=0.3, label='Before Rain')
+    plt.bar(range(N_moor), moor_after_rain, color='orange', alpha=0.3, label='After Rain')
+    plt.bar(range(N_moor), moor_after_overflow, color='red', alpha=0.3, label='After Overflow')
+    plt.ylim(0, y_limit)
+    plt.axhline(y=w_moor, color='black', linestyle='--', label=f"Weir={w_moor}")
+    plt.title("Moor")
+    plt.legend()
+    
+    # Reservoir plot
+    plt.subplot(5, 1, 3)
+    plt.bar(range(N_reservoir), reservoir_before, color='brown', alpha=0.3, label='Before Rain')
+    plt.bar(range(N_reservoir), reservoir_after_rain, color='yellow', alpha=0.3, label='After Rain')
+    plt.bar(range(N_reservoir), reservoir_after_overflow, color='pink', alpha=0.3, label='After Overflow')
+    plt.ylim(0, y_limit)
+    plt.axhline(y=w_res, color='black', linestyle='--', label=f"Weir={w_res}")
+    plt.title("Reservoir")
+    plt.legend()
+    
+    # Lake plot
+    plt.subplot(5, 1, 4)
+    plt.bar(range(N_lake), lake_before, color='blue', alpha=0.3, label='Before Rain')
+    plt.bar(range(N_lake), lake_after_rain, color='purple', alpha=0.3, label='After Rain')
+    plt.bar(range(N_lake), lake_after_overflow, color='gray', alpha=0.3, label='After Overflow')
+    plt.ylim(0, y_limit)
+    plt.axhline(y=w_lake, color='black', linestyle='--', label=f"Weir={w_lake}")
+    plt.title("Lake")
+    plt.legend()
+    
+    # Wetland status plot
+    plt.subplot(5, 1, 5)
+    colors = ['green' if wetland_status[i] else 'gray' for i in range(N_river)]
+    plt.bar(range(N_river), [1] * N_river, color=colors)
+    plt.ylim(0, 2)
+    plt.title("Wetland Status (Green=Planted)")
+    
+    plt.tight_layout()
+    plt.pause(0.1)
+    city_flood_history.append(city_flood_count)
+
+def wetropolis_game(steps=20):
+    global team_score, city_flood_count, h_moorweir, h_reservoirweir, h_lakeweir
+    river = np.zeros((2, N_river), dtype=int)
+    overflow_buffer = np.zeros_like(river)
+    moor = np.zeros(N_moor, dtype=int)
+    reservoir = np.zeros(N_reservoir, dtype=int)
+    lake = np.zeros(N_lake, dtype=int)
+    
+    for step in range(steps):
+        river += overflow_buffer
+        overflow_buffer = np.zeros_like(river)
+        print(f"\n===== Round {step+1} =====")
+        print(f"Score: {team_score}")
+        
+        # Rainfall
+        loc_roll = roll_dice()
+        amt_roll = roll_dice()
+        rain_locs = rainfall_location(loc_roll)
+        rain_amt = rainfall_amount(amt_roll)
+        print(f"Rain on {rain_locs} with {rain_amt} units)")
+        
+        # Player input
+        user_str = input("Enter [moor_weir reservoir_weir lake_weir leak_open(0/1) plant_segment (e.g. 5 6 7 0 40,55)]: ")
+        parts = user_str.split()
+        if len(parts) < 5:
+            nmw, nrw, nlw, lop, seg = h_moorweir, h_reservoirweir, h_lakeweir, 0, 'none'
+        else:
+            try:
+                nmw = int(parts[0])
+                nrw = int(parts[1])
+                nlw = int(parts[2])
+                lop = int(parts[3])
+                seg = parts[4]
+            except:
+                nmw, nrw, nlw, lop, seg = h_moorweir, h_reservoirweir, h_lakeweir, 0, 'none'
+        
+        # Process actions
+        nmw = max(0, min(12, nmw))
+        nrw = max(0, min(12, nrw))
+        nlw = max(0, min(12, nlw))
+        
+        # Cost calculations
+        if nmw != h_moorweir:
+            team_score -= 3
+            print(f"Moor weir changed to {nmw} (-3)")
+        if nrw != h_reservoirweir:
+            team_score -= 3
+            print(f"Reservoir weir changed to {nrw} (-3)")
+        if nlw != h_lakeweir:
+            team_score -= 3
+            print(f"Lake weir changed to {nlw} (-3)")
+        if lop == 1:
+            team_score -= 3
+            print("Leak opened (-3)")
+        
+        # Weir collapse checks
+        nmw_before = nmw
+        nrw_before = nrw
+        nlw_before = nlw
+
+        nmw = check_weir_collapse(nmw)
+        nrw = check_weir_collapse(nrw)
+        nlw = check_weir_collapse(nlw)
+        
+        if nmw < nmw_before:
+            print(f"Moor weir collapsed to {nmw}, cost -10.")
+            team_score -= 10
+        if nrw < nrw_before:
+            print(f"Reservoir weir collapsed to {nrw}, cost -10.")
+            team_score -= 10
+        if nlw < nlw_before:
+            print(f"Lake weir collapsed to {nlw}, cost -10.")
+            team_score -= 10
+        
+        # Wetland planting
+        if seg.lower() != 'none':
+            try:
+                start, end = map(int, seg.split(','))
+                start = max(0, min(N_river-1, start))
+                end = max(0, min(N_river-1, end))
+                if start > end: start, end = end, start
+                for i in range(start, end+1):
+                    wetland_status[i] = True
+                team_score -= 10
+                print(f"Planted wetlands [{start}-{end}] (-10)")
+            except:
+                print("Invalid planting segment")
+        
+        # Update weirs
+        h_moorweir, h_reservoirweir, h_lakeweir = nmw, nrw, nlw
+        
+        # Apply rainfall
+        moor_before = moor.copy()
+        reservoir_before = reservoir.copy()
+        lake_before = lake.copy()
+        if 'moor' in rain_locs: moor += rain_amt
+        if 'reservoir' in rain_locs: reservoir += rain_amt
+        if 'lake' in rain_locs: lake += rain_amt
+        moor_after_rain = moor.copy()
+        reservoir_after_rain = reservoir.copy()
+        lake_after_rain = lake.copy()
+        
+        # Process overflows
+        overflow_buffer = spread_overflow(moor, h_moorweir, overflow_buffer, i_moor, N_moor)
+        overflow_buffer = spread_overflow(reservoir, h_reservoirweir, overflow_buffer, i_reservoir, N_reservoir)
+        overflow_buffer = spread_overflow(lake, h_lakeweir, overflow_buffer, i_lake, N_lake)
+        moor_after_overflow = moor.copy()
+        reservoir_after_overflow = reservoir.copy()
+        lake_after_overflow = lake.copy()
+        
+        # River flow
+        river, leaked = flow_with_leak(river, lop, leak_capacity, i_leak)
+        print(f"Leaked: {leaked}")
+        
+        # Channel-flood plain interaction
+        for i in range(N_river):
+            channel = river[0, i]
+            flood = river[1, i]
+            
+            if channel > h_plain and flood < Capacity_plain:
+                excess = channel - h_plain
+                space = Capacity_plain - flood
+                to_move = min(excess, space)
+                
+                river[0, i] -= to_move
+                river[1, i] += to_move
+            else:
+                transfer = min(1, flood)
+                river[0, i] += transfer
+                river[1, i] -= transfer
+        
+        # City flooding check
+        city_water = river[:, i_city:i_city+N_city]
+        if np.any(city_water > h_citywalls):
+            excess = np.sum(city_water - h_citywalls)
+            penalty = excess // 5
+            city_flood_count += 1
+            team_score -= penalty
+            river[:, i_city:i_city+N_city] = 0
+            print(f"City flooded! (-{penalty})")
+        else:
+            team_score += 10
+            print("City safe (+10)")
+        
+        print(f"New score: {team_score}")
+        plot_state(river, moor_before, moor_after_rain, moor_after_overflow,
+                   reservoir_before, reservoir_after_rain, reservoir_after_overflow,
+                   lake_before, lake_after_rain, lake_after_overflow, step,
+                   h_moorweir, h_reservoirweir, h_lakeweir)
+        time.sleep(delay_time)
+    
+    print("\n===== GAME OVER =====")
+    print(f"Total floods: {city_flood_count}")
+    print(f"Final score: {team_score}")
+
+if __name__ == "__main__":
+    plt.figure(figsize=(12, 10))
+    wetropolis_game(steps=20)
+    plt.show()
